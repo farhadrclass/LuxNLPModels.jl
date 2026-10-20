@@ -1,4 +1,4 @@
-# One run: a problem from models.jl with one optimizer. STATUS: written, not executed.
+# One run: a problem from models.jl with one optimizer.
 #
 #   julia --project=examples examples/run.jl PROBLEM OPTIMIZER [EPOCHS] [SEED] [options]
 #
@@ -8,8 +8,8 @@
 #   options    --gpu  --act=relu|gelu|tanh  --pool=max|mean  --lr=1e-3 (adam)  --batchsize=128
 #              --subset=N  --nval=5000  --valseed=0
 #
-# SEED sets the initialization and the batch order (paired across methods); the validation split
-# depends only on --valseed. Validation is held out of the training data (at most 20% of it).
+# SEED sets the initialization and the minibatch order (paired across methods); the
+# validation split depends only on --valseed and holds out at most 20% of the training data.
 # Output: results/<PROBLEM>_<OPTIMIZER>_s<SEED>.csv       one row per epoch (validation metric)
 #         results/<PROBLEM>_<OPTIMIZER>_s<SEED>_test.csv  test metric of the final iterate
 using Random, CSV, DataFrames, Lux, LuxNLPModels, JSOSolvers
@@ -44,35 +44,36 @@ nsub = parse(Int, option("subset", "0"))
 nval = parse(Int, option("nval", "5000"))
 valseed = parse(Int, option("valseed", "0"))
 
-# ---------------- data, model ----------------
-dev = USE_GPU ? gpu_device() : cpu_device()
-model, train, test, objective, metric = problem(pname; act, pool)
+# ---------------- data and model ----------------
+model, train, test, loss_f, metric = problem(pname; act, pool)
 nsub > 0 && (train = select_obs(train, 1:nsub))
 train, val = split_validation(train, min(nval, count_obs(train) ÷ 5); seed = valseed)
-source = ArrayBatchSource(train; batchsize = min(bs, count_obs(train)), seed = seed)
-hvp_kw = USE_GPU ? (; hvp_backend = :finite_difference) : (;)
-nlp = LuxNLPModel(model, source; objective, seed, device = dev, hvp_kw...)
+fullbatch = endswith(oname, "_full")
+nlp = LuxNLPModel(model, train, val; loss_f, seed,
+                  batchsize = fullbatch ? count_obs(train) : min(bs, count_obs(train)),
+                  shuffle = !fullbatch,
+                  device = USE_GPU ? gpu_device() : cpu_device())
 
 # ---------------- optimizer ----------------
 runners = Dict(
-  "adam" => () -> run_adam(nlp, val, metric; epochs, η = lr, sync!),
-  "fomo_batchwise" => () -> run_jso_batchwise(:fomo, nlp, val, metric; epochs, sync!),
-  "r2_batchwise" => () -> run_jso_batchwise(:fo, nlp, val, metric; epochs, sync!),
-  "fomo_callback" => () -> run_jso_callback(:fomo, nlp, val, metric; epochs, sync!),
-  "r2_callback" => () -> run_jso_callback(:fo, nlp, val, metric; epochs, sync!),
-  "tradam" => () -> run_contract(TRAdam, "tradam", nlp, val, metric; epochs, sync!, stochastic = true),
-  "fomo_full" => () -> run_jso_fullbatch(fomo, "fomo_full", nlp, val, metric; sync!),
-  "r2_full" => () -> run_jso_fullbatch(R2, "r2_full", nlp, val, metric; sync!),
-  "lbfgs_full" => () -> run_jso_fullbatch(lbfgs, "lbfgs_full", nlp, val, metric; sync!),
-  "trunk_full" => () -> run_jso_fullbatch(trunk, "trunk_full", nlp, val, metric; sync!),
+  "adam" => () -> run_adam(nlp, metric; epochs, η = lr, sync!),
+  "fomo_batchwise" => () -> run_jso_batchwise(:fomo, nlp, metric; epochs, sync!),
+  "r2_batchwise" => () -> run_jso_batchwise(:fo, nlp, metric; epochs, sync!),
+  "fomo_callback" => () -> run_jso_callback(:fomo, nlp, metric; epochs, sync!),
+  "r2_callback" => () -> run_jso_callback(:fo, nlp, metric; epochs, sync!),
+  "tradam" => () -> run_contract(TRAdam, "tradam", nlp, metric; epochs, sync!, stochastic = true),
+  "fomo_full" => () -> run_jso_fullbatch(fomo, "fomo_full", nlp, metric; sync!),
+  "r2_full" => () -> run_jso_fullbatch(R2, "r2_full", nlp, metric; sync!),
+  "lbfgs_full" => () -> run_jso_fullbatch(lbfgs, "lbfgs_full", nlp, metric; sync!),
+  "trunk_full" => () -> run_jso_fullbatch(trunk, "trunk_full", nlp, metric; sync!),
 )
-haskey(runners, oname) || error("unknown optimizer $oname; choose from $(join(sort!(collect(keys(runners))), ", "))")
+haskey(runners, oname) ||
+  error("unknown optimizer $oname; choose from $(join(sort!(collect(keys(runners))), ", "))")
 history, x = runners[oname]()
 
-# ---------------- final test evaluation (once) ----------------
+# ---------------- final test evaluation, once ----------------
 sync!()
-recalibrate_state!(nlp, x)
-test_metric = _metric(nlp, x, test, metric)
+test_metric = evaluate_metric(nlp, x, test, metric)
 println("test $metric: $test_metric")
 
 mkpath("results")

@@ -4,7 +4,6 @@
 # (`pool = MeanPool`); ReLU and MaxPool are piecewise smooth. Second-order / NPC experiments that
 # assume C² should use `--act=gelu --pool=mean`.
 using Lux, MLDatasets, Random
-using LuxNLPModels: classification_objective, mse_objective
 
 # ---------------- data helpers ----------------
 count_obs(A::AbstractArray) = size(A, ndims(A))
@@ -69,7 +68,7 @@ _resblock(c, act) = Chain(
                        Conv((3, 3), c => c; pad = 1), BatchNorm(c)), +),
   WrappedFunction(x -> act.(x)))                      # CHECK: WrappedFunction signature in Lux v1
 
-"Small ResNet for 32×32×3 inputs (BatchNorm: layer state matters, see recalibrate_state!)."
+"Small ResNet for 32×32×3 inputs (BatchNorm: evaluation uses testmode_state)."
 small_resnet(; nclasses = 10, width = 32, act = relu, pool = MaxPool) = Chain(
   Conv((3, 3), 3 => width; pad = 1), BatchNorm(width, act),
   _resblock(width, act), pool((2, 2)),
@@ -77,14 +76,14 @@ small_resnet(; nclasses = 10, width = 32, act = relu, pool = MaxPool) = Chain(
   _resblock(2width, act), pool((2, 2)),
   GlobalMeanPool(), FlattenLayer(), Dense(2width => nclasses))
 
-"Autoencoder on flattened inputs; train with mse_objective and data (x, x)."
+"Autoencoder on flattened inputs; train with MSELoss() and data (x, x)."
 autoencoder(nin; latent = 32, width = 256, act = gelu) = Chain(
   Dense(nin => width, act), Dense(width => latent, act),
   Dense(latent => width, act), Dense(width => nin))
 
 # ---------------- registry ----------------
 """
-    problem(name; act = nothing, pool = nothing) -> (model, train, test, objective, metric)
+    problem(name; act = nothing, pool = nothing) -> (model, train, test, loss_f, metric)
 
 `train`/`test` are data tuples; `metric` is `:accuracy` or `:mse`. `nothing` keeps the
 architecture's default activation / pooling.
@@ -93,19 +92,19 @@ function problem(name::Symbol; act = nothing, pool = nothing)
   if name === :mlp_mnist
     (tr, te) = load_images(:mnist)
     return mlp(784, 10; act = something(act, gelu)), (flat(tr[1]), tr[2]), (flat(te[1]), te[2]),
-           classification_objective, :accuracy
+           CrossEntropyLoss(; logits = Val(true)), :accuracy
   elseif name === :lenet_mnist || name === :lenet_fashion
     (tr, te) = load_images(name === :lenet_mnist ? :mnist : :fashion)
     return lenet5(; act = something(act, relu), pool = something(pool, MaxPool)), tr, te,
-           classification_objective, :accuracy
+           CrossEntropyLoss(; logits = Val(true)), :accuracy
   elseif name === :resnet_cifar10
     (tr, te) = load_cifar10()
     return small_resnet(; act = something(act, relu), pool = something(pool, MaxPool)), tr, te,
-           classification_objective, :accuracy
+           CrossEntropyLoss(; logits = Val(true)), :accuracy
   elseif name === :ae_mnist
     (tr, te) = load_images(:mnist)
     Xtr, Xte = flat(tr[1]), flat(te[1])
-    return autoencoder(784; act = something(act, gelu)), (Xtr, Xtr), (Xte, Xte), mse_objective, :mse
+    return autoencoder(784; act = something(act, gelu)), (Xtr, Xtr), (Xte, Xte), MSELoss(), :mse
   else
     error("unknown problem $name")
   end

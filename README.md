@@ -1,89 +1,85 @@
 # LuxNLPModels.jl
 
-Lux networks as `AbstractNLPModel`s, so JuliaSmoothOptimizers solvers, first or second order,
-can train them on CPU or GPU, with minibatches, supervised or RL objectives.
+LuxNLPModels exposes a [Lux.jl](https://github.com/LuxDL/Lux.jl) network and a loss as an
+`AbstractNLPModel`, so that [JuliaSmoothOptimizers](https://jso.dev) solvers, first or second
+order, can train it on CPU or GPU with minibatches. Where it overlaps with
+[FluxNLPModels.jl](https://github.com/JuliaSmoothOptimizers/FluxNLPModels.jl), the API is the same.
 
-**Status: written, never executed.** Run the tests first. Lines marked `CHECK` depend on package
-behaviour to confirm against the installed versions. Nothing here is "ready" until the tests pass.
+## Quick start
 
-## Layout
+```julia
+using Lux, LuxNLPModels, JSOSolvers
+using MLDataDevices: gpu_device
 
-```
-LuxNLPModels.jl/
-├── Project.toml              package deps and compat
-├── README.md
-├── .JuliaFormatter.toml      JSO style
-├── .gitattributes  .gitignore
-├── src/                      the package: models only, no solvers
-│   ├── LuxNLPModels.jl       module, exports, includes
-│   ├── batch_sources.jl      AbstractBatchSource, ArrayBatchSource (supervised and RL data)
-│   ├── objectives.jl         classification and MSE objectives
-│   ├── model.jl              LuxNLPModel, constructor, PassCounts
-│   ├── stochastic_interface.jl  the contract: next_batch!, set_batch!, commit_state!, ...
-│   ├── api.jl                obj, grad!, objgrad!
-│   ├── hvp.jl                hprod! (finite differences or forward-over-reverse)
-│   ├── evaluation.jl         recalibrate_state!, mean_objective, accuracy
-│   └── rl.jl                 PPO objective
-├── test/
-│   ├── Project.toml
-│   ├── runtests.jl           shared helpers, includes the files below
-│   ├── test_batch_sources.jl
-│   ├── test_api.jl
-│   ├── test_hvp.jl
-│   ├── test_state.jl
-│   ├── test_rl.jl
-│   ├── test_solvers.jl       fomo, R2, lbfgs (first order) and trunk (second order)
-│   └── test_gpu.jl           opt-in: LUXNLPMODELS_TEST_GPU=true
-└── examples/                 everything that is not the package
-    ├── Project.toml
-    ├── README.md
-    ├── models.jl  runners.jl  run.jl  ppo.jl
-    └── solvers/
-        └── tradam.jl         solver prototype
+model = Chain(Dense(784 => 128, gelu), Dense(128 => 10))
+nlp = LuxNLPModel(model, (Xtrain, Ytrain), (Xval, Yval); batchsize = 128, device = gpu_device())
+
+# Full-batch, deterministic: build the model with batchsize = number of observations.
+# Minibatches with an existing solver: switch the minibatch in the callback.
+stats = fomo(nlp; max_iter = 1_000, callback = (nlp, solver, stats) -> minibatch_next_train!(nlp))
+accuracy(nlp, stats.solution)
 ```
 
-To add from the JSO template (BestieTemplate.jl) before publishing: `LICENSE`, `.github/workflows`
-(CI, TagBot, CompatHelper), `docs/` (Documenter).
+Data are arrays, or Tuples / NamedTuples of arrays, with observations along the last
+dimension; `Y` is one-hot for `accuracy`. Any loss with Lux's training signature
+`loss_f(model, ps, st, batch) -> (loss, st, stats)` works, including Lux's own losses.
 
-## The stochastic contract
+## API
 
-For any solver, first or second order:
-
-1. f(x_k), f(x_k + s_k), g(x_k) and any Hessian-vector product at x_k use the same batch.
-2. The batch changes only after an accepted step: the solver calls `commit_state!` and
-   `next_batch!` (e.g. through an `on_accept!` hook), then recomputes f and g on the new batch.
-3. Callbacks and evaluation code never switch the batch.
-
-Stochastic layers (Dropout) are reseeded at every batch switch: all evaluations on one batch
-use the same masks. The contract makes ratio tests compare values of the same function f_B; it
-does not by itself make an accepted step decrease the full objective f.
-
-## Changes in this version
-
-| Issue | Fix |
+| Function | Purpose |
 |---|---|
-| `nlp.hvp_backend = :finite_difference` failed (typed field) | field untyped; `set_hvp_backend!` also resets the preparation |
-| `recalibrate_state!` used the current batch size (whole data set after a full-batch switch) | uses `nominal_batchsize(source)` |
-| metadata advertised a dense Hessian (`nnzh = n(n+1)/2`, `hess_available = true`) | `nnzh = 0`, `hess_available = false` |
-| BatchNorm state stayed Float32 when `T = Float64` | parameters and state converted with `f32`/`f64` |
-| Dropout masks frozen for solvers that never commit; changed by evaluation | RNGs reseeded at batch switches; evaluation restores them |
-| evaluation chunks of 10 000, whole test set at once | chunks of 1 000; host-side argmax |
-| `next_batch!` after a size change broke the buffers | sources return to the nominal size, AD re-prepared |
-| `RolloutBuffer` duplicated `ArrayBatchSource` | one source; `replace_data!` for new rollouts |
-| no cost measure beyond oracle counts | `pass_counts(nlp)`: forward and backward passes |
-| examples tuned and logged on the test set | validation split; test evaluated once at the end |
-| TRAdam: about eight host synchronizations per iteration | two fused reductions + `obj` |
+| `LuxNLPModel(model, data_train, data_test; loss_f, batchsize, shuffle, T, device, seed, grad_backend, hvp_backend)` | build the model |
+| `obj`, `grad!`, `objgrad!`, `hprod!` | NLPModels API on the current minibatch |
+| `minibatch_next_train!(nlp)` | next minibatch; returns `false` when a pass ends |
+| `reset_minibatch_train!(nlp)` | restart the current pass |
+| `set_data_train!(nlp, data)` | replace the training data (e.g. a new RL rollout) |
+| `epoch(nlp)` | completed passes |
+| `params_view(nlp, x)` | structured parameters at `x` (a view) |
+| `testmode_state(nlp, x)` | layer state for test-mode evaluation at `x` |
+| `accuracy(nlp, x; data)` | test-mode classification accuracy |
+
+## What a solver can rely on
+
+Between two minibatch switches, `obj`, `grad!`, `objgrad!` and `hprod!` describe one function:
+same minibatch, same layer state, same Dropout masks, training-mode normalization. Switching
+the minibatch is the only operation that changes that function. A solver that compares f at two
+points (a ratio test, a line search) therefore compares values of one function as long as it
+does not switch the minibatch in between.
+
+Evaluation (`testmode_state`, `accuracy`) never changes the minibatch or the layer state used by
+the solver, so it can run inside a callback.
+
+## Differences from FluxNLPModels
+
+| | FluxNLPModels | LuxNLPModels |
+|---|---|---|
+| BatchNorm and Dropout | Flux layers are active only inside a gradient call, so `obj` evaluates the test-mode network and `grad!` the training-mode one | `obj`, `grad!` and `hprod!` evaluate the same training-mode function |
+| Dropout masks | redrawn at every evaluation inside a gradient | fixed between minibatch switches |
+| BatchNorm statistics at evaluation | whatever the layers accumulated | recomputed at `x` by `testmode_state`, independently of the solver |
+| `accuracy` | at the weights of the last `obj`/`grad!` call | at an explicit `x` |
+| Second order | — | `hprod!`: forward-over-reverse, or finite differences on GPU |
+| `objgrad!` | a separate forward pass for f, then a forward and backward pass for g | one forward and one backward pass |
+| GPU minibatches | device passed per call; the batch loaded at the end of a pass is not moved | device fixed at construction; batches copied into a preallocated device buffer |
+| Precision | converted on the fly (Float16, Float32, Float64) | fixed at construction (Float32 or Float64); a vector of another type is rejected |
+
+The FluxNLPModels column is read from its source (`main` branch), not from running it.
 
 ## GPU
 
-Designed for GPU, untested. Parameters, workspaces and the current batch live on `device`; data
-stay on the host and one batch is copied per switch (keeping the data on the device is a
-possible improvement). Use `hvp_backend = :finite_difference` on GPU until forward-over-reverse
-has been tested. In Float32, ratio tests lose meaning when the predicted decrease falls below
-about `1e-7 |f|`.
+Parameters, workspaces and the current minibatch live on `device`; data stay on the host and one
+minibatch is copied per switch. The default `hvp_backend` on GPU is `:finite_difference`
+(two gradients per product). In Float32, ratio tests lose meaning when the predicted decrease is
+below about `1e-7 |f|`.
 
-## Setup
+## Examples
 
-1. Julia ≥ 1.10.
-2. `julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.test()'`
-3. Examples: see `examples/README.md`.
+`examples/` holds the model zoo (MLP, LeNet-5, ResNet with BatchNorm, autoencoder), runners for
+Adam and JSO solvers, a pass-counting wrapper, PPO, and the TRAdam solver prototype. See
+`examples/README.md`.
+
+## Development
+
+```bash
+julia --project -e 'using Pkg; Pkg.test()'
+LUXNLPMODELS_TEST_GPU=true julia --project -e 'using Pkg; Pkg.test()'
+```

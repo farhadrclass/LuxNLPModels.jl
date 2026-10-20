@@ -1,52 +1,57 @@
 @testset "layer state" begin
-  @testset "BatchNorm: precision and commit" begin
-    X, Y = toy_data(Float64, Xoshiro(4))
-    m = Chain(Dense(3 => 4), BatchNorm(4), Dense(4 => 2))
-    nlp = LuxNLPModel(m, ArrayBatchSource((X, Y); batchsize = 16); T = Float64)
+  @testset "f and ∇f describe one function with $(nameof(typeof(layer)))" for layer in (BatchNorm(4), Dropout(0.5))
+    m = Chain(Dense(3 => 4, tanh), layer, Dense(4 => 2))
+    nlp = LuxNLPModel(m, toy_data(Float64, Xoshiro(8)); T = Float64, batchsize = 16)
     x = nlp.meta.x0
-    @test eltype(nlp.st.layer_2.running_mean) == Float64   # state converted to T
-    _, st_new, _ = nlp.objective(nlp.model, params_view(nlp, x), nlp.st, current_batch(nlp))
-    @test typeof(st_new) == typeof(nlp.st)                   # no conversion when stored
-
-    rm0 = copy(nlp.st.layer_2.running_mean)
-    f1 = obj(nlp, x)
-    @test nlp.st.layer_2.running_mean == rm0                 # obj does not commit
-    commit_state!(nlp)
-    @test nlp.st.layer_2.running_mean != rm0                 # commit adopts the new statistics
-    @test obj(nlp, x) ≈ f1 rtol = 1e-12                      # training-mode f does not use them
+    v = randn(Xoshiro(9), length(x))
+    for _ in 1:2
+      @test obj(nlp, x) == obj(nlp, x)
+      @test dot(grad(nlp, x), v) ≈ fd_dir(z -> obj(nlp, z), x, v) rtol = 1e-6
+      minibatch_next_train!(nlp)
+    end
   end
 
-  @testset "recalibration uses the nominal batch size and leaves f unchanged" begin
-    X, Y = toy_data(Float64, Xoshiro(5))
-    sizes = Int[]
-    spy(model, ps, st, batch) = (push!(sizes, size(batch[2], 2)); classification_objective(model, ps, st, batch))
+  @testset "BatchNorm state has the precision T" begin
     m = Chain(Dense(3 => 4), BatchNorm(4), Dense(4 => 2))
-    nlp = LuxNLPModel(m, ArrayBatchSource((X, Y); batchsize = 16); objective = spy, T = Float64)
-    x = nlp.meta.x0
-    use_full_batch!(nlp)
-    f = obj(nlp, x)
-    rm0 = copy(nlp.st.layer_2.running_mean)
-    empty!(sizes)
-    recalibrate_state!(nlp, x; nbatches = 3)
-    @test sizes == [16, 16, 16]                              # not the 64 of the current batch
-    @test nlp.st.layer_2.running_mean != rm0
-    @test obj(nlp, x) ≈ f rtol = 1e-12
+    nlp = LuxNLPModel(m, toy_data(Float64, Xoshiro(10)); T = Float64, batchsize = 16)
+    @test eltype(nlp.st.layer_2.running_mean) == Float64
   end
 
-  @testset "Dropout: same mask within a batch, new mask per batch" begin
-    X, Y = toy_data(Float64, Xoshiro(6))
+  @testset "Dropout: one mask per minibatch" begin
     m = Chain(Dense(3 => 8, tanh), Dropout(0.5), Dense(8 => 2))
-    nlp = LuxNLPModel(m, ArrayBatchSource((X, Y); batchsize = 16); T = Float64)
+    nlp = LuxNLPModel(m, toy_data(Float64, Xoshiro(11)); T = Float64, batchsize = 64, shuffle = false)
     x = nlp.meta.x0
-    v = ones(length(x))
-    @test obj(nlp, x) == obj(nlp, x)                          # same batch, same mask
-    @test dot(grad(nlp, x), v) ≈ fd_dir(z -> obj(nlp, z), x, v) rtol = 1e-6   # f and g agree
-    r0 = copy(nlp.st.layer_2.rng)
-    commit_state!(nlp)
-    next_batch!(nlp)
-    r1 = copy(nlp.st.layer_2.rng)
-    @test r1 != r0                                            # new batch, new mask
-    recalibrate_state!(nlp, x; nbatches = 3)
-    @test nlp.st.layer_2.rng == r1                            # evaluation leaves masks alone
+    f = obj(nlp, x)
+    r = copy(nlp.st.layer_2.rng)
+    reset_minibatch_train!(nlp)                      # same 64 observations, new mask
+    @test nlp.st.layer_2.rng != r
+    @test obj(nlp, x) != f
+  end
+
+  @testset "testmode_state recomputes BatchNorm statistics and leaves nlp.st alone" begin
+    m = Chain(Dense(3 => 4), BatchNorm(4), Dense(4 => 2))
+    X, Y = toy_data(Float64, Xoshiro(12); n = 256)
+    X .+= 3                                          # nonzero mean: the initial statistics are wrong
+    nlp = LuxNLPModel(m, (X, Y), (X, Y); T = Float64, batchsize = 32)
+    x = nlp.meta.x0
+    st0 = deepcopy(nlp.st)
+    f = obj(nlp, x)
+    st = testmode_state(nlp, x)
+    @test nlp.st == st0 && obj(nlp, x) == f          # solver-side state and f unchanged
+    h, _ = nlp.model.layers.layer_1(X, params_view(nlp, x).layer_1, nlp.st.layer_1)
+    μ = vec(mean(h; dims = 2))
+    @test norm(st.layer_2.running_mean - μ) < 0.25 * norm(μ)
+    @test norm(nlp.st.layer_2.running_mean - μ) > 0.9 * norm(μ)
+    a = accuracy(nlp, x; st = st)
+    @test 0 <= a <= 1 && nlp.st == st0
+  end
+
+  @testset "accuracy matches a direct computation" begin
+    nlp = toy_nlp(Float64)
+    x = nlp.meta.x0
+    X, Y = nlp.data_test
+    ŷ, _ = nlp.model(X, params_view(nlp, x), Lux.testmode(nlp.st))
+    direct = mean(argmax(ŷ[:, j]) == argmax(Y[:, j]) for j in axes(Y, 2))
+    @test accuracy(nlp, x; chunk = 10) ≈ direct
   end
 end

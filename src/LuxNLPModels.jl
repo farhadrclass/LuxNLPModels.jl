@@ -1,50 +1,28 @@
 """
     LuxNLPModels
 
-Expose a Lux network and a training objective as an `AbstractNLPModel`, so that
-JuliaSmoothOptimizers solvers, first or second order, can train it on CPU or GPU.
-
-Design:
-- variables = flattened Lux parameters, viewed through ComponentArray axes, stored on `device`;
-- objective = Lux training signature `(model, ps, st, batch) -> (loss, st, stats)`;
-- data = an `AbstractBatchSource`; batches have a fixed size and are gathered into
-  preallocated host and device buffers;
-- `obj`, `grad!`, `objgrad!` and `hprod!` are all evaluated on the current batch, which only
-  the solver changes (`next_batch!`); see `stochastic_interface.jl` for the contract;
-- every evaluation starts from the committed layer state; `commit_state!` adopts the state
-  returned by the last `obj` call; stochastic layers are reseeded at each batch switch;
-- derivatives via DifferentiationInterface with prepared operators, reused across batches;
-- `pass_counts(nlp)` records forward and backward passes, for cost comparisons.
-
-Solvers are not part of this package.
-
-STATUS: written, not executed. Lines marked CHECK depend on package behaviour to confirm.
+Expose a Lux network and a loss as an `AbstractNLPModel`, so that JuliaSmoothOptimizers
+solvers, first or second order, can train it on CPU or GPU with minibatches.
+The API follows FluxNLPModels.jl where the two packages overlap.
 """
 module LuxNLPModels
 
-using LinearAlgebra, Random, Statistics
+using LinearAlgebra, Random
 using NLPModels
 using Lux
-using NNlib: logsoftmax
 using ComponentArrays
 using DifferentiationInterface          # re-exports AutoZygote, AutoForwardDiff; defines SecondOrder
-using MLDataDevices: cpu_device
+using MLDataDevices: CPUDevice, cpu_device
+using MLUtils: DataLoader, numobs, getobs
 import Zygote, ForwardDiff              # load the default AD backends
 
-export LuxNLPModel
-export AbstractBatchSource, ArrayBatchSource
-export next_batch!, set_batch!, use_full_batch!, replace_data!, current_batch, epoch, commit_state!
-export params_view, pass_counts, set_hvp_backend!
-export recalibrate_state!, mean_objective, accuracy
-export classification_objective, mse_objective, ppo_objective
+export AbstractLuxNLPModel, LuxNLPModel
+export minibatch_next_train!, reset_minibatch_train!, set_data_train!, epoch
+export params_view, testmode_state, accuracy
 
-include("batch_sources.jl")
-include("objectives.jl")
 include("model.jl")
-include("stochastic_interface.jl")
+include("minibatch.jl")
 include("api.jl")
-include("hvp.jl")
 include("evaluation.jl")
-include("rl.jl")
 
 end # module

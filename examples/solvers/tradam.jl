@@ -1,9 +1,16 @@
 # TRAdam: Adam's direction with a trust region in the norm defined by Adam's diagonal scaling.
-# PROTOTYPE, not part of LuxNLPModels: it needs only the NLPModels API (obj, grad!, objgrad!) and
-# the `on_accept!` hook of the stochastic contract, so it runs on any AbstractNLPModel. When it
-# matures it belongs in its own package or in JSOSolvers (align with src/fomo.jl first:
-# parameter-set struct as in FOMOParameterSet, docstring layout, allocation tests).
-# A second-order variant would add hprod! calls at x_k, on the same batch; the contract covers it.
+# PROTOTYPE, not part of LuxNLPModels. It needs only the NLPModels API (obj, grad!, objgrad!)
+# and an `on_accept!(nlp)` hook, so it runs on any AbstractNLPModel. With a LuxNLPModel, pass
+# `on_accept! = minibatch_next_train!`. When it matures it belongs in its own package or in
+# JSOSolvers (align with src/fomo.jl first: parameter-set struct, docstrings, allocation tests).
+#
+# Minibatch discipline (solver side; the model only guarantees that evaluations between two
+# minibatch switches describe one function):
+#   1. f(x_k), f(x_k + s_k), g(x_k) and any Hessian-vector product at x_k use one minibatch;
+#   2. the minibatch changes only after an accepted step, then f and g are recomputed;
+#   3. callbacks never switch the minibatch.
+# This makes the ratio test compare values of one function f_B; it does not by itself make an
+# accepted step decrease the full objective f. A second-order variant adds hprod! calls at x_k.
 #
 # With H = diag(h), h = sqrt(v̂) + ϵv (bias-corrected second moment), the step is
 #     s = -τ H⁻¹ d,  τ = min(1, Δ / ‖d‖_{H⁻¹}),  so ‖s‖_H ≤ Δ,
@@ -11,10 +18,8 @@
 # (damping) so that gᵀH⁻¹d ≥ λ1 gᵀH⁻¹g and ‖d‖_{H⁻¹} ≤ λ2 ‖g‖_{H⁻¹}. Then
 #     pred = -gᵀs - sᵀHs/2 ≥ τ gᵀH⁻¹g (λ1 - λ2²/2) > 0   when λ1 > λ2²/2.
 #
-# GPU: each scalar reduction blocks the host. Per iteration this version does two fused
-# reductions and one `obj`, plus `objgrad!` and `norm(g)` after an accepted step.
-#
-# STATUS: prototype, not executed. Lines marked CHECK depend on package behaviour.
+# GPU: each scalar reduction blocks the host. Per iteration: two fused reductions and one `obj`,
+# plus `objgrad!` and `norm(g)` after an accepted step. Lines marked CHECK are unverified.
 using LinearAlgebra, NLPModels, SolverCore
 
 mutable struct TRAdamSolver{T, V} <: AbstractOptimizationSolver
@@ -136,7 +141,7 @@ function SolverCore.solve!(
     @. s = -τ * d / h
     pred = τ * gd - τ^2 * dd / 2             # = -gᵀs - sᵀHs/2
     @. xt = xk + s
-    ft = obj(nlp, xt)                        # same batch as fk (contract, item 1)
+    ft = obj(nlp, xt)                        # same minibatch as fk (discipline, item 1)
     ρ = pred > 0 ? (fk - ft) / pred : -T(Inf)
 
     if ρ >= η1
@@ -145,7 +150,7 @@ function SolverCore.solve!(
       v .= vplus
       j += 1
       if stochastic
-        on_accept!(nlp)                      # commit state, switch batch (contract, item 2)
+        on_accept!(nlp)                      # switch minibatch (discipline, item 2)
         fk, _ = objgrad!(nlp, xk, g)
       else
         fk = ft
@@ -164,7 +169,7 @@ function SolverCore.solve!(
     set_status!(stats, get_status(nlp; elapsed_time = stats.elapsed_time,
                                   optimal = !stochastic && gnorm <= ϵ, max_eval = max_eval,
                                   iter = stats.iter, max_iter = max_iter, max_time = max_time))
-    callback(nlp, solver, stats)             # never switches the batch (contract, item 3)
+    callback(nlp, solver, stats)             # never switches the minibatch (item 3)
     done = stats.status != :unknown
   end
   set_solution!(stats, xk)
