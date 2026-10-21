@@ -6,15 +6,12 @@
   end
   make(; kwargs...) = LuxNLPModel(Dense(2 => 3), (X, Y); T = Float64, batchsize = 4, kwargs...)
 
-  @testset "passes, epochs, reset" begin
+  @testset "passes and epochs" begin
     nlp = make(; shuffle = false)
     @test nlp.batch[1] == X[:, 1:4] && epoch(nlp) == 0
     @test minibatch_next_train!(nlp)
     @test nlp.batch[1] == X[:, 5:8]
     @test !minibatch_next_train!(nlp)                # 9:10 incomplete: dropped, new pass
-    @test epoch(nlp) == 1 && nlp.batch[1] == X[:, 1:4]
-    minibatch_next_train!(nlp)
-    reset_minibatch_train!(nlp)
     @test epoch(nlp) == 1 && nlp.batch[1] == X[:, 1:4]
   end
 
@@ -28,26 +25,10 @@
     @test sort(seen) == X[1, :]
   end
 
-  @testset "the model's batch is its own copy" begin
-    nlp = make(; shuffle = false)
-    b = copy(nlp.batch[1])
-    _, s = iterate(nlp.loader)
-    iterate(nlp.loader, s)                           # loader buffer now holds observations 5:8
-    @test nlp.batch[1] == b
-  end
-
-  @testset "set_data_train!" begin
-    nlp = make(; shuffle = false)
-    set_data_train!(nlp, (2 .* X, Y))
-    @test epoch(nlp) == 0 && nlp.batch[1] == 2 .* X[:, 1:4]
-    @test_throws ArgumentError set_data_train!(nlp, (Float32.(X), Float32.(Y)))   # other type
-    @test_throws DimensionMismatch set_data_train!(nlp, (zeros(3, 10), Y))        # other shape
-    @test_throws ArgumentError set_data_train!(nlp, (X[:, 1:3], Y[:, 1:3]))       # too few
-  end
-
-  @testset "constructor checks" begin
+  @testset "constructor" begin
     @test_throws ArgumentError make(; batchsize = 11)
-    @test_throws ArgumentError LuxNLPModel(Dense(2 => 3), (Float32.(X), Float32.(Y)); T = Float64)
+    nlp = LuxNLPModel(Dense(2 => 3), (Float32.(X), Float32.(Y)); T = Float64, batchsize = 4)
+    @test eltype(nlp.batch[1]) == Float64             # data converted to T
   end
 
   @testset "NamedTuple data and a custom loss" begin

@@ -23,12 +23,12 @@
     x = nlp.meta.x0
     f = obj(nlp, x)
     r = copy(nlp.st.layer_2.rng)
-    reset_minibatch_train!(nlp)                      # same 64 observations, new mask
-    @test nlp.st.layer_2.rng != r
+    @test !minibatch_next_train!(nlp)                # one batch per pass: same 64 observations
+    @test nlp.st.layer_2.rng != r                    # but a new mask
     @test obj(nlp, x) != f
   end
 
-  @testset "testmode_state recomputes BatchNorm statistics and leaves nlp.st alone" begin
+  @testset "evaluation recomputes BatchNorm statistics and leaves nlp.st alone" begin
     m = Chain(Dense(3 => 4), BatchNorm(4), Dense(4 => 2))
     X, Y = toy_data(Float64, Xoshiro(12); n = 256)
     X .+= 3                                          # nonzero mean: the initial statistics are wrong
@@ -36,13 +36,13 @@
     x = nlp.meta.x0
     st0 = deepcopy(nlp.st)
     f = obj(nlp, x)
-    st = testmode_state(nlp, x)
+    st = LuxNLPModels._testmode_state(nlp, params_view(nlp, x))
     @test nlp.st == st0 && obj(nlp, x) == f          # solver-side state and f unchanged
     h, _ = nlp.model.layers.layer_1(X, params_view(nlp, x).layer_1, nlp.st.layer_1)
     μ = vec(mean(h; dims = 2))
     @test norm(st.layer_2.running_mean - μ) < 0.25 * norm(μ)
     @test norm(nlp.st.layer_2.running_mean - μ) > 0.9 * norm(μ)
-    a = accuracy(nlp, x; st = st)
+    a = accuracy(nlp, x)
     @test 0 <= a <= 1 && nlp.st == st0
   end
 
@@ -52,6 +52,6 @@
     X, Y = nlp.data_test
     ŷ, _ = nlp.model(X, params_view(nlp, x), Lux.testmode(nlp.st))
     direct = mean(argmax(ŷ[:, j]) == argmax(Y[:, j]) for j in axes(Y, 2))
-    @test accuracy(nlp, x; chunk = 10) ≈ direct
+    @test accuracy(nlp, x) ≈ direct
   end
 end

@@ -4,7 +4,7 @@
   dev = gpu_device()
   data = toy_data(Float32, Xoshiro(13))
   mk(device) = LuxNLPModel(toy_mlp(), data, data; T = Float32, batchsize = 16, seed = 3,
-                           device = device, hvp_backend = :finite_difference)
+                           device = device)
   ncpu, ngpu = mk(cpu_device()), mk(dev)
   xc = copy(ncpu.meta.x0)
   xg = dev(xc)

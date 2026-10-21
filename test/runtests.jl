@@ -2,7 +2,6 @@
 # GPU:  LUXNLPMODELS_TEST_GPU=true julia --project -e 'using Pkg; Pkg.test()'
 using Test, LinearAlgebra, Random, Statistics
 using NLPModels, NLPModelsTest, JSOSolvers, Lux, LuxNLPModels
-using DifferentiationInterface: SecondOrder, AutoForwardDiff, AutoZygote
 using MLDataDevices: cpu_device, gpu_device
 
 const TEST_GPU = get(ENV, "LUXNLPMODELS_TEST_GPU", "false") == "true"

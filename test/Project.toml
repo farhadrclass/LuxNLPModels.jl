@@ -1,6 +1,5 @@
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 JSOSolvers = "10dff2fc-5484-5881-a0e0-c90441020f8a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
@@ -14,7 +13,6 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
 CUDA = "5, 6"
-DifferentiationInterface = "0.7"
 JSOSolvers = "0.14"
 LinearAlgebra = "1.10"
 Lux = "1"
