@@ -15,6 +15,18 @@
     @test epoch(nlp) == 1 && nlp.batch[1] == X[:, 1:4]
   end
 
+  @testset "set_batchsize!" begin
+    nlp = make(; shuffle = false)
+    minibatch_next_train!(nlp)
+    @test set_batchsize!(nlp, 5) === nlp
+    @test nlp.batch[1] == X[:, 1:5] && epoch(nlp) == 0     # the pass restarts with the new size
+    @test minibatch_next_train!(nlp) && nlp.batch[1] == X[:, 6:10]
+    @test !minibatch_next_train!(nlp) && epoch(nlp) == 1
+    x = nlp.meta.x0
+    @test grad(nlp, x) ≈ grad(make(; shuffle = false, batchsize = 5), x)
+    @test_throws ArgumentError set_batchsize!(nlp, 11)
+  end
+
   @testset "shuffled passes visit distinct observations" begin
     nlp = make(; batchsize = 5, seed = 1)
     seen = Float64[]

@@ -1,8 +1,9 @@
 # julia --project -e 'using Pkg; Pkg.test()'
 # GPU:  LUXNLPMODELS_TEST_GPU=true julia --project -e 'using Pkg; Pkg.test()'
-using Test, LinearAlgebra, Random, Statistics
-using NLPModels, NLPModelsTest, JSOSolvers, Lux, LuxNLPModels
-using MLDataDevices: cpu_device, gpu_device
+using Test, LinearAlgebra, Random
+using NLPModels, NLPModelsTest, JSOSolvers, SolverCore, Lux, LuxNLPModels
+using DifferentiationInterface: SecondOrder
+import ForwardDiff                      # outer backend of the exact Hessian-vector products
 
 const TEST_GPU = get(ENV, "LUXNLPMODELS_TEST_GPU", "false") == "true"
 if TEST_GPU
@@ -22,9 +23,11 @@ end
 toy_mlp() = Chain(Dense(3 => 5, tanh), Dense(5 => 2))
 
 toy_nlp(::Type{T}; kwargs...) where {T} =
-  LuxNLPModel(toy_mlp(), toy_data(T, Xoshiro(1)), toy_data(T, Xoshiro(2)); T = T, batchsize = 16, kwargs...)
+  LuxNLPModel(toy_mlp(), toy_data(T, Xoshiro(1)); T = T, batchsize = 16, kwargs...)
 
 fd_dir(f, x, v; h = 1e-6) = (f(x + h * v) - f(x - h * v)) / (2h)
+
+const EXACT_HVP = SecondOrder(AutoForwardDiff(), AutoZygote())
 
 @testset "LuxNLPModels" begin
   include("test_minibatch.jl")

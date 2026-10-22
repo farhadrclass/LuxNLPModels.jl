@@ -8,18 +8,16 @@ module LuxNLPModels
 
 using LinearAlgebra, Random
 using NLPModels
-using Lux
+using Lux                               # re-exports cpu_device and gpu_device
 using ComponentArrays
 using DifferentiationInterface          # re-exports AutoZygote
-using MLDataDevices: cpu_device
-using MLUtils: DataLoader, numobs, getobs
+using MLUtils: DataLoader, numobs
 import Zygote                           # load the default AD backend
 
-export LuxNLPModel, minibatch_next_train!, epoch, params_view, accuracy
+export LuxNLPModel, minibatch_next_train!, set_batchsize!, epoch, params_view
 
 include("model.jl")
 include("api.jl")
 include("minibatch.jl")
-include("evaluation.jl")
 
 end # module
