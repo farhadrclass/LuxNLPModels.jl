@@ -43,8 +43,12 @@ end
 For a deterministic, full-batch problem (e.g. `lbfgs` or `trunk` to convergence), use
 `batchsize = number of observations` and do not switch minibatches.
 
-A complete script, LeNet-5 on MNIST with a CPU/GPU switch, `R2` or `trunk`, and a configurable
-batch size, is in [`examples/lenet_mnist.jl`](examples/lenet_mnist.jl).
+Complete scripts are in [`examples/`](examples/README.md):
+
+- [`lenet_mnist.jl`](examples/lenet_mnist.jl): LeNet-5 on MNIST, with a CPU/GPU switch, `R2` or
+  `trunk`, and a configurable batch size.
+- [`pinn_poisson.jl`](examples/pinn_poisson.jl): a small PINN for a 1-D Poisson problem, trained
+  with Adam + L-BFGS and with trunk, and compared.
 
 ## API
 
