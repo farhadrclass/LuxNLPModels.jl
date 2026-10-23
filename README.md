@@ -49,6 +49,9 @@ Complete scripts are in [`examples/`](examples/README.md):
   `trunk`, and a configurable batch size.
 - [`pinn_poisson.jl`](examples/pinn_poisson.jl): a small PINN for a 1-D Poisson problem, trained
   with Adam + L-BFGS and with trunk, and compared.
+- [`pinn_nernst_planck.jl`](examples/pinn_nernst_planck.jl): the Nernst-Planck PINN optimizer
+  benchmark from SciMLBenchmarks / NeuralPDE: Adam, RMSProp, R2, L-BFGS, Adam + L-BFGS and
+  trunk on the same loss.
 
 ## API
 

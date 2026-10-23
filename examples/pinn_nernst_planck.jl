@@ -90,7 +90,7 @@ function pnp_loss(model, ps, st, pts)
   stencil = hcat(vcat(t, x), vcat(t, x .- δx), vcat(t, x .+ δx), vcat(t .- δt, x),
                  vcat(t .+ δt, x), pts[:, (n_in + 1):end])
   (Φo, Nao, Clo), _ = model(stencil, ps, st)
-  Φ, Φx, Φxx, _ = derivatives(Φo)
+  _, Φx, Φxx, _ = derivatives(Φo)
   Na, Nax, Naxx, Nat = derivatives(Nao)
   Cl, Clx, Clxx, Clt = derivatives(Clo)
   pde = msq(Φxx .- (z_Na .* Na .+ z_Cl .* Cl) ./ Po_1) +
@@ -145,7 +145,7 @@ push!(runs, "trunk" => (nlp, x, n, record) -> jso_run(trunk, nlp, x, n, record))
 
 # ---------------- benchmark ----------------
 for (_, method) in runs                       # compile everything, so timings measure training
-  method(nlp, copy(nlp.meta.x0), 2, f -> nothing)
+  method(nlp, copy(nlp.meta.x0), 1, f -> nothing)
 end
 
 println("device: $device, $(nlp.meta.nvar) parameters, $(size(points, 2)) points, ",

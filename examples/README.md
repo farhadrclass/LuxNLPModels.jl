@@ -29,6 +29,38 @@ How the PINN fits the library:
 - All collocation points form one batch (`batchsize = n_points, shuffle = false`), so the
   problem is deterministic, as L-BFGS and trunk expect.
 
+## Nernst-Planck PINN: optimizer benchmark
+
+`pinn_nernst_planck.jl` is adapted from the SciMLBenchmarks "Nernst-Planck Equation
+Physics-Informed Neural Network (PINN) Optimizer Benchmarks", itself adapted from *NeuralPDE:
+Automating Physics-Informed Neural Networks (PINNs) with Error Approximations* (Zubov et al.,
+arXiv:2107.09443), which uses NeuralPDE.jl. It is a 1-D Poisson-Nernst-Planck system for the
+potential Φ and the Na⁺ / Cl⁻ concentrations, with three 2→16→16→16→1 `tanh` networks.
+
+The original's equations, constants, conditions, networks and budget (200 iterations; 50 Adam +
+150 BFGS) are kept. The differences:
+
+- the loss is written directly as a Lux loss, on fixed grids of collocation points instead of
+  adaptive quadrature, with finite-difference derivatives in one forward pass;
+- L-BFGS replaces BFGS, which JSOSolvers does not have.
+
+Methods compared:
+
+- Adam and RMSProp, each with step sizes 0.001, 0.005 and 0.05;
+- R2;
+- L-BFGS;
+- Adam + L-BFGS (50 + 150 iterations);
+- trunk.
+
+```bash
+julia --project=examples examples/pinn_nernst_planck.jl          # CPU
+julia --project=examples examples/pinn_nernst_planck.jl --gpu    # GPU, as in the original
+```
+
+It prints each method's final loss, time and gradient / Hessian-vector product counts, and
+keeps the loss history (time, loss) of every method in `histories`. The end of the script shows
+how to plot loss against time, as in the original.
+
 ## LeNet-5 on MNIST
 
 `lenet_mnist.jl` loads MNIST, builds LeNet-5, wraps it in a `LuxNLPModel` and trains it on
