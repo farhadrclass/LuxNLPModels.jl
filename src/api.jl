@@ -1,98 +1,138 @@
-# NLPModels API on the current minibatch, through DifferentiationInterface preparations made
-# in the constructor. Costs: obj = 1 forward pass; grad! and objgrad! = 1 forward + 1 backward;
-# hprod! = 2 gradients (finite differences) or 1 forward-over-reverse pass (hvp_backend).
+# NLPModels API for unconstrained problems: obj, grad!, objgrad!, hprod!.
 
-# TODO: measure whether ComponentArrays makes gradients allocate in proportion to depth. Its
-# Zygote rule for `getproperty` allocates a full-size zero array per field access, and `Chain`
-# reads `ps.layer_i` for every layer, so one gradient may cost about 2 × depth × n floats.
-# Check with depth = 2, 8, 32 (on GPU use `CUDA.@time` instead of `@allocated`):
-#   model = Chain([Dense(256 => 256, relu) for _ in 1:depth]..., Dense(256 => 10))
-#   X = randn(Float32, 256, 1024); Y = Float32.((1:10) .== rand(1:10, 1, 1024))
-#   nlp = LuxNLPModel(model, (X, Y); batchsize = 128); x = nlp.meta.x0; g = similar(x)
-#   grad!(nlp, x, g); @allocated(grad!(nlp, x, g)) / sizeof(x)
-# Ratio constant in depth: keep ComponentArrays. Ratio growing with depth: build parameters
-# with `x0, re = Optimisers.destructure(ps)` and use `re(x)` below (one flat gradient), or
-# use `grad_backend = AutoEnzyme()`, which does not go through that rule.
-_loss(x, model, ax, st, batch, loss_f) = first(loss_f(model, ComponentArray(x, ax...), st, batch))
+_lossvalue(l::Number) = l
+_lossvalue(l::Tuple) = first(l)
+_lossvalue(l) = throw(ArgumentError(
+  "the loss must return a scalar or a tuple `(value, st, stats)`, got $(typeof(l))"))
 
-_contexts(model, ax, st, batch, loss_f) =
-  (Constant(model), Constant(ax), Constant(st), Constant(batch), Constant(loss_f))
-_contexts(nlp::LuxNLPModel) = _contexts(nlp.model, nlp.ax, nlp.st, nlp.batch, nlp.loss_f)
+# The objective as a function of the flat parameter vector; everything else is a constant
+# context for DifferentiationInterface.
+_objective(x, model, loss, ax, st, batch) =
+  _lossvalue(loss(model, ComponentArray(x, ax), st, batch))
 
-function _prepare(grad_backend, hvp_backend, x, contexts)
-  prep = prepare_gradient(_loss, grad_backend, x, contexts...)
-  hvp_prep = hvp_backend === nothing ? nothing :
-             prepare_hvp(_loss, hvp_backend, x, (zero(x),), contexts...)
-  return prep, hvp_prep
+_contexts(nlp::LuxNLPModel) =
+  (Constant(nlp.model), Constant(nlp.loss), Constant(nlp.axes), Constant(nlp.st), Constant(nlp.batch))
+
+# AD preparations are cached and keyed on the argument types (DI checks them strictly) and
+# invalidated by `set_batch!` when the batch shape changes.
+function _grad_prep(nlp::LuxNLPModel, x, ctx)
+  p = nlp.grad_prep
+  if p === nothing || p[1] !== typeof(x)
+    p = (typeof(x), DI.prepare_gradient(_objective, nlp.backend, x, ctx...))
+    nlp.grad_prep = p
+  end
+  return p[2]
 end
 
-_gradient!(nlp::LuxNLPModel, g, x) =
-  gradient!(_loss, g, nlp.prep, nlp.grad_backend, x, _contexts(nlp)...)
+function _hvp_prep(nlp::LuxNLPModel, x, v, ctx)
+  p = nlp.hvp_prep
+  if p === nothing || p[1] !== (typeof(x), typeof(v))
+    p = ((typeof(x), typeof(v)), DI.prepare_hvp(_objective, nlp.hvp_backend, x, (v,), ctx...))
+    nlp.hvp_prep = p
+  end
+  return p[2]
+end
 
-# The gradient is prepared for vectors of type S; say so instead of failing inside DI.
-_check_type(::LuxNLPModel{<:Any, S}, x) where {S} =
-  x isa S || throw(ArgumentError("expected a vector of type $S, got $(typeof(x)); " *
-                                 "the precision and device are fixed at construction"))
+function _value_and_gradient!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector)
+  ctx = _contexts(nlp)
+  prep = _grad_prep(nlp, x, ctx)
+  f, _ = DI.value_and_gradient!(_objective, g, prep, nlp.backend, x, ctx...)
+  return f
+end
 
 function NLPModels.obj(nlp::LuxNLPModel, x::AbstractVector)
   @lencheck nlp.meta.nvar x
-  _check_type(nlp, x)
   increment!(nlp, :neval_obj)
-  return _loss(x, nlp.model, nlp.ax, nlp.st, nlp.batch, nlp.loss_f)
+  _account!(nlp; forward = 1)
+  return _objective(x, nlp.model, nlp.loss, nlp.axes, nlp.st, nlp.batch)
 end
 
 function NLPModels.grad!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector)
   @lencheck nlp.meta.nvar x g
-  _check_type(nlp, x)
   increment!(nlp, :neval_grad)
-  return _gradient!(nlp, g, x)
+  _account!(nlp; forward = 1, backward = 1)
+  _value_and_gradient!(nlp, x, g)
+  return g
 end
 
-"One forward and one backward pass (the NLPModels fallback would make two forward passes)."
+# One forward + one backward pass; NLPModels convention counts it as one obj and one grad.
 function NLPModels.objgrad!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector)
   @lencheck nlp.meta.nvar x g
-  _check_type(nlp, x)
   increment!(nlp, :neval_obj)
   increment!(nlp, :neval_grad)
-  fx, _ = value_and_gradient!(_loss, g, nlp.prep, nlp.grad_backend, x, _contexts(nlp)...)
-  return fx, g
+  _account!(nlp; forward = 1, backward = 1)
+  f = _value_and_gradient!(nlp, x, g)
+  return f, g
 end
 
-function NLPModels.hprod!(nlp::LuxNLPModel{T}, x::AbstractVector, v::AbstractVector,
-                          Hv::AbstractVector; obj_weight = one(T)) where {T}
+function NLPModels.hprod!(nlp::LuxNLPModel, x::AbstractVector, v::AbstractVector,
+                          Hv::AbstractVector; obj_weight::Real = one(eltype(x)))
   @lencheck nlp.meta.nvar x v Hv
-  _check_type(nlp, x)
-  _check_type(nlp, v)
   increment!(nlp, :neval_hprod)
-  σ = T(obj_weight)                     # a Float64 weight would run GPU kernels in Float64
-  iszero(σ) && return fill!(Hv, zero(T))
-  _hvp!(nlp, nlp.hvp_backend, x, v, Hv)
-  isone(σ) || (Hv .*= σ)
+  _account!(nlp; hvp = 1)
+  ctx = _contexts(nlp)
+  prep = _hvp_prep(nlp, x, v, ctx)
+  DI.hvp!(_objective, (Hv,), prep, nlp.hvp_backend, x, (v,), ctx...)
+  isone(obj_weight) || (Hv .*= obj_weight)
   return Hv
 end
 
-# Lagrangian form required by the NLPModels API; without constraints it is the objective HVP.
-function NLPModels.hprod!(nlp::LuxNLPModel{T}, x::AbstractVector, y::AbstractVector,
-                          v::AbstractVector, Hv::AbstractVector; obj_weight = one(T)) where {T}
-  @lencheck nlp.meta.ncon y
-  return hprod!(nlp, x, v, Hv; obj_weight = obj_weight)
+# Lagrangian version (no constraints, so y is empty).
+function NLPModels.hprod!(nlp::LuxNLPModel, x::AbstractVector, y::AbstractVector,
+                          v::AbstractVector, Hv::AbstractVector; obj_weight::Real = one(eltype(x)))
+  @lencheck 0 y
+  return NLPModels.hprod!(nlp, x, v, Hv; obj_weight = obj_weight)
 end
 
-# Central difference of the gradient along v, O(h²) truncation error; h ∝ cbrt(eps)(1 + ‖x‖)/‖v‖
-# balances truncation and rounding.
-function _hvp!(nlp::LuxNLPModel{T}, ::Nothing, x, v, Hv) where {T}
-  nv = norm(v)
-  iszero(nv) && return fill!(Hv, zero(T))
-  h = cbrt(eps(T)) * (one(T) + norm(x)) / nv
-  w, gm = nlp.w, nlp.gm
-  @. w = x + h * v
-  _gradient!(nlp, Hv, w)
-  @. w = x - h * v
-  _gradient!(nlp, gm, w)
-  @. Hv = (Hv - gm) / (2h)
-  return Hv
-end
+"""
+    full_objective(nlp, x; data = nlp.data, st = nlp.st)
 
-# Exact product from a DifferentiationInterface second-order backend.
-_hvp!(nlp::LuxNLPModel, backend, x, v, Hv) =
-  hvp!(_loss, (Hv,), nlp.hvp_prep, backend, x, (v,), _contexts(nlp)...)
+Loss on `data` (the full training set by default) at `x`, *without* touching the counters or
+the current batch. Intended for monitoring; use `data = test_data` for held-out loss.
+"""
+full_objective(nlp::LuxNLPModel, x::AbstractVector; data = nlp.data, st = nlp.st) =
+  _objective(x, nlp.model, nlp.loss, nlp.axes, st, data)
+
+"""
+    check_derivatives(nlp, x = nlp.meta.x0; ndirs = 3, h = cbrt(eps(T)), hprod = true, rng = Xoshiro(0))
+
+Compare the AD derivatives with central finite differences along `ndirs` random unit
+directions `d`: the directional derivative `∇f(x)ᵀd` with `(f(x+hd) - f(x-hd)) / 2h`, and
+(if `hprod`) `∇²f(x)d` with `(∇f(x+hd) - ∇f(x-hd)) / 2h`.
+Returns the largest relative errors `(grad = ..., hprod = ...)`; counters are left untouched.
+
+Run it in Float64 (`ps = f64(ps)`) for every new loss, in particular losses that themselves
+differentiate the network (PINN residuals): some nested-AD combinations return wrong
+parameter gradients without any error or warning. Expect errors around `h^2` (truncation)
+plus `eps/h` (rounding), i.e. ~1e-10 in Float64 for smooth losses.
+"""
+function check_derivatives(nlp::LuxNLPModel{T}, x::AbstractVector = nlp.meta.x0;
+                           ndirs::Integer = 3, h::Real = cbrt(eps(T)), hprod::Bool = true,
+                           rng::AbstractRNG = Random.Xoshiro(0)) where {T}
+  counters = deepcopy(nlp.counters)
+  wk = deepcopy(nlp.work)
+  n = nlp.meta.nvar
+  g = similar(x); gp = similar(x); gm = similar(x); Hd = similar(x); d = similar(x)
+  grad!(nlp, x, g)
+  err_g = zero(T)
+  err_h = zero(T)
+  for _ in 1:ndirs
+    dh = randn(rng, T, n)
+    copyto!(d, dh ./ norm(dh))
+    fp = obj(nlp, x .+ T(h) .* d)
+    fm = obj(nlp, x .- T(h) .* d)
+    fd = (fp - fm) / (2 * T(h))
+    ad = dot(g, d)
+    err_g = max(err_g, abs(fd - ad) / max(abs(fd), abs(ad), eps(T)))
+    if hprod
+      NLPModels.hprod!(nlp, x, d, Hd)
+      grad!(nlp, x .+ T(h) .* d, gp)
+      grad!(nlp, x .- T(h) .* d, gm)
+      fdH = (gp .- gm) ./ (2 * T(h))
+      err_h = max(err_h, norm(fdH .- Hd) / max(norm(fdH), norm(Hd), eps(T)))
+    end
+  end
+  nlp.counters = counters
+  nlp.work = wk
+  return (grad = err_g, hprod = hprod ? err_h : T(NaN))
+end

@@ -1,5 +1,3 @@
 Manifest.toml
 */Manifest.toml
-docs/build
-results/
-.DS_Store
+examples/results_*.csv

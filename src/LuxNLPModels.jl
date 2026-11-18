@@ -1,23 +1,47 @@
 """
     LuxNLPModels
 
-Expose a Lux network and a loss as an `AbstractNLPModel`, so that JuliaSmoothOptimizers
-solvers, first or second order, can train it on CPU or GPU with minibatches.
+Expose the training problem of a [Lux.jl](https://lux.csail.mit.edu) model as an
+`AbstractNLPModel`, so that solvers from JuliaSmoothOptimizers (`R2`, `fomo`, `lbfgs`,
+`trunk`, ...) can be used to train it and compared against Optimisers.jl rules (`Adam`,
+`Descent`, ...) on exactly the same objective.
+
+The optimization variable is the flat vector underlying `ComponentArray(ps)`.
+It lives on whatever device the parameters live on (CPU `Vector` or GPU `CuVector`).
 """
 module LuxNLPModels
 
-using LinearAlgebra, Random
+using LinearAlgebra
+using Random
+
 using NLPModels
-using Lux                               # re-exports cpu_device and gpu_device
-using ComponentArrays
-using DifferentiationInterface          # re-exports AutoZygote
-using MLUtils: DataLoader, numobs
-import Zygote                           # load the default AD backend
+using NLPModels: @lencheck, increment!
+using SolverCore: SolverCore, GenericExecutionStats, set_status!, set_iter!, set_time!,
+  set_objective!, set_dual_residual!, set_solution!, set_solver_specific!
 
-export LuxNLPModel, minibatch_next_train!, set_batchsize!, epoch, params_view
+using LuxCore: LuxCore
+using ComponentArrays: ComponentArray, getaxes, getdata
 
+using ADTypes: AbstractADType, AutoZygote, AutoForwardDiff
+import DifferentiationInterface as DI
+using DifferentiationInterface: Constant
+
+# Loaded so that the default backends (AutoZygote, ForwardDiff-over-Zygote) work out of the box.
+using Zygote: Zygote
+using ForwardDiff: ForwardDiff
+
+using Optimisers: Optimisers
+
+export LuxNLPModel
+export current_batch, set_batch!, next_batch!, reset_batches!, use_full_batch!, epoch
+export unflatten, predict, full_objective, check_derivatives, work, reset_work!
+export TrainingLog, logging_callback, minibatch_callback, budget_callback, combine_callbacks
+export train_optimisers, train_by_batches
+
+include("batching.jl")
 include("model.jl")
 include("api.jl")
-include("minibatch.jl")
+include("callbacks.jl")
+include("optimisers.jl")
 
 end # module
