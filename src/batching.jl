@@ -33,6 +33,15 @@ getobs(x::Tuple, idx) = map(d -> getobs(d, idx), x)
 getobs(x::NamedTuple, idx) = map(d -> getobs(d, idx), x)
 
 """
+    AbstractBatchSampler
+
+Draws minibatches from the data. Interface: `_draw!(s, data)` (next batch), `_epoch(s)`,
+`_reset_sampler!(s)`, `_sampler_nobs(s, data)` (observations per epoch) and
+`_batch_nobs(s, batch)` (observations in a batch), used for work accounting.
+"""
+abstract type AbstractBatchSampler end
+
+"""
     MinibatchSampler
 
 Sampling without replacement within an epoch; the permutation is redrawn at every epoch
@@ -40,7 +49,7 @@ when `shuffle = true`. With `partial = false` (default) the last incomplete batc
 epoch is dropped so that every minibatch has exactly `batchsize` observations.
 `epoch` is the 1-based index of the epoch to which the current batch belongs.
 """
-mutable struct MinibatchSampler{R <: AbstractRNG}
+mutable struct MinibatchSampler{R <: AbstractRNG} <: AbstractBatchSampler
   nobs::Int
   batchsize::Int
   shuffle::Bool
@@ -79,6 +88,65 @@ function _reset_sampler!(s::MinibatchSampler)
   s.epoch = 1
   s.shuffle && Random.shuffle!(s.rng, s.perm)
   return s
+end
+
+_draw!(s::MinibatchSampler, data) = getobs(data, next_indices!(s))
+_epoch(s::MinibatchSampler) = s.epoch
+_sampler_nobs(s::MinibatchSampler, data) = s.nobs
+_batch_nobs(::MinibatchSampler, batch) = max(_count(batch), 1)
+
+"""
+    FieldSampler
+
+Per-field minibatching of a `NamedTuple` of data sets with different numbers of observations,
+e.g. PINN interior and boundary collocation points. Built from
+`batchsize = (interior = 64, boundary = nothing)`: an integer draws minibatches of that size
+from the field (each field has its own permutation and epochs); `nothing` passes the whole
+field in every batch. The epoch counter and the work accounting follow the *driving* field,
+the sampled field with the most minibatches per epoch.
+"""
+mutable struct FieldSampler{NT <: NamedTuple} <: AbstractBatchSampler
+  samplers::NT        # field => MinibatchSampler or nothing
+  driving::Symbol
+end
+
+function FieldSampler(data::NamedTuple, batchsize::NamedTuple; shuffle::Bool = true,
+                      partial::Bool = false, rng::AbstractRNG = Random.default_rng())
+  keys(batchsize) == keys(data) || throw(ArgumentError(
+    "`batchsize` must have the same fields as the data, in the same order: $(keys(data)); got $(keys(batchsize))"))
+  samplers = map(keys(data)) do k
+    b = batchsize[k]
+    b === nothing ? nothing : MinibatchSampler(numobs(data[k]), b; shuffle, partial, rng)
+  end
+  samplers = NamedTuple{keys(data)}(samplers)
+  sampled = [k for k in keys(data) if samplers[k] !== nothing]
+  isempty(sampled) && throw(ArgumentError("at least one field must have an integer batch size"))
+  driving = sampled[argmax([nbatches(samplers[k]) for k in sampled])]
+  return FieldSampler(samplers, driving)
+end
+
+function _draw!(s::FieldSampler, data::NamedTuple)
+  vals = map(keys(data)) do k
+    sk = s.samplers[k]
+    sk === nothing ? data[k] : getobs(data[k], next_indices!(sk))
+  end
+  return NamedTuple{keys(data)}(vals)
+end
+_epoch(s::FieldSampler) = s.samplers[s.driving].epoch
+function _reset_sampler!(s::FieldSampler)
+  foreach(sk -> sk === nothing || _reset_sampler!(sk), values(s.samplers))
+  return s
+end
+_sampler_nobs(s::FieldSampler, data) = numobs(data[s.driving])
+_batch_nobs(s::FieldSampler, batch) = numobs(batch[s.driving])
+
+# full-batch mode
+_batch_nobs(::Nothing, batch) = max(_count(batch), 1)
+
+_count(x) = try
+  numobs(x)
+catch
+  0
 end
 
 # Shape signature of a batch; used to decide whether cached AD preparations are still valid.

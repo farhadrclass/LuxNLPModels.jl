@@ -29,7 +29,7 @@ epoch). Stopping rules mirror JSOSolvers (`SolverCore.get_status`) plus `max_epo
 - `callback = (nlp, solver, stats) -> nothing` (set `stats.status = :user` to stop),
 - `verbose = 0` (print every `verbose` iterations).
 """
-function train_optimisers(nlp::LuxNLPModel{T, S}, rule::Optimisers.AbstractRule;
+function train_optimisers(nlp::LuxModels{T, S}, rule::Optimisers.AbstractRule;
                           x::S = nlp.meta.x0,
                           atol::Real = √eps(T),
                           rtol::Real = √eps(T),
@@ -131,7 +131,7 @@ solve, so [`logging_callback`](@ref) produces logs comparable to `train_optimise
 Keywords: `x = nlp.meta.x0`, `max_epochs = 1`, `max_iter = typemax(Int)` (outer iterations),
 `max_time = 30.0`, `callback`, `verbose = 0`.
 """
-function train_by_batches(nlp::LuxNLPModel{T, S}, solve;
+function train_by_batches(nlp::LuxModels{T, S}, solve;
                           x::S = nlp.meta.x0,
                           max_epochs::Real = 1,
                           max_iter::Integer = typemax(Int),
@@ -147,7 +147,7 @@ function train_by_batches(nlp::LuxNLPModel{T, S}, solve;
   set_time!(stats, 0.0)
   set_iter!(stats, 0)
   # iteration-0 record: monitoring value, not counted as work
-  set_objective!(stats, T(_objective(xk, nlp.model, nlp.loss, nlp.axes, nlp.st, nlp.batch)))
+  set_objective!(stats, T(full_objective(nlp, xk; data = nlp.batch)))
   set_dual_residual!(stats, T(NaN))
   set_status!(stats, :unknown)
   callback(nlp, solver, stats)

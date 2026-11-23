@@ -33,10 +33,17 @@ function _hvp_prep(nlp::LuxNLPModel, x, v, ctx)
   return p[2]
 end
 
-function _value_and_gradient!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector)
+_value_and_gradient!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector) =
+  _eval_value_and_grad!(nlp, nlp.backend, x, g)
+
+# ---- evaluation hooks (methods for ReactantBackend are in the Reactant extension)
+_eval_obj_on(nlp::LuxNLPModel, backend, x, batch) =
+  _objective(x, nlp.model, nlp.loss, nlp.axes, nlp.st, batch)
+
+function _eval_value_and_grad!(nlp::LuxNLPModel, backend, x, g)
   ctx = _contexts(nlp)
   prep = _grad_prep(nlp, x, ctx)
-  f, _ = DI.value_and_gradient!(_objective, g, prep, nlp.backend, x, ctx...)
+  f, _ = DI.value_and_gradient!(_objective, g, prep, backend, x, ctx...)
   return f
 end
 
@@ -44,7 +51,7 @@ function NLPModels.obj(nlp::LuxNLPModel, x::AbstractVector)
   @lencheck nlp.meta.nvar x
   increment!(nlp, :neval_obj)
   _account!(nlp; forward = 1)
-  return _objective(x, nlp.model, nlp.loss, nlp.axes, nlp.st, nlp.batch)
+  return _eval_obj_on(nlp, nlp.backend, x, nlp.batch)
 end
 
 function NLPModels.grad!(nlp::LuxNLPModel, x::AbstractVector, g::AbstractVector)
@@ -68,6 +75,7 @@ end
 function NLPModels.hprod!(nlp::LuxNLPModel, x::AbstractVector, v::AbstractVector,
                           Hv::AbstractVector; obj_weight::Real = one(eltype(x)))
   @lencheck nlp.meta.nvar x v Hv
+  nlp.hvp_backend === nothing && throw(ArgumentError("hprod! is not available with this backend"))
   increment!(nlp, :neval_hprod)
   _account!(nlp; hvp = 1)
   ctx = _contexts(nlp)
@@ -91,7 +99,8 @@ Loss on `data` (the full training set by default) at `x`, *without* touching the
 the current batch. Intended for monitoring; use `data = test_data` for held-out loss.
 """
 full_objective(nlp::LuxNLPModel, x::AbstractVector; data = nlp.data, st = nlp.st) =
-  _objective(x, nlp.model, nlp.loss, nlp.axes, st, data)
+  st === nlp.st ? _eval_obj_on(nlp, nlp.backend, x, data) :
+                  _objective(x, nlp.model, nlp.loss, nlp.axes, st, data)
 
 """
     check_derivatives(nlp, x = nlp.meta.x0; ndirs = 3, h = cbrt(eps(T)), hprod = true, rng = Xoshiro(0))
@@ -135,4 +144,87 @@ function check_derivatives(nlp::LuxNLPModel{T}, x::AbstractVector = nlp.meta.x0;
   nlp.counters = counters
   nlp.work = wk
   return (grad = err_g, hprod = hprod ? err_h : T(NaN))
+end
+
+# ---------------------------------------------------------------------------------------
+# Explicit Hessian: NOT RECOMMENDED for neural networks.
+#
+# The Hessian of a network loss is dense. Storing its lower triangle takes n(n+1)/2 entries
+# and every evaluation costs n Hessian-vector products (one per column), i.e. roughly n times
+# the cost of a gradient. It is provided only so that solvers that factorize the Hessian
+# (e.g. `R2N` with `MA57R2NSubsolver` / `MA97R2NSubsolver`, which need HSL) can be tried on
+# *small* networks, as a reference point. Prefer `hprod!` / `hess_op` (R2N's default Krylov
+# subsolvers CG, CR, MINRES; `trunk`) or quasi-Newton models, which never form the matrix.
+# ---------------------------------------------------------------------------------------
+
+function _check_hess_size(nlp::LuxNLPModel)
+  n = nlp.meta.nvar
+  n ≤ nlp.max_hess_nvar || throw(ArgumentError(
+    "the explicit Hessian of this model would be dense with $n variables " *
+    "($(nlp.meta.nnzh) stored entries, $n Hessian-vector products per evaluation). " *
+    "This is not recommended; use `hprod!`/`hess_op` (e.g. R2N with CGR2NSubsolver) instead, " *
+    "or raise the limit with `LuxNLPModel(...; max_hess_nvar = $n)`."))
+  return nothing
+end
+
+"""
+    hess_structure!(nlp::LuxNLPModel, rows, cols)
+
+Structure of the explicit Hessian: the dense lower triangle, column by column
+(`nlp.meta.nnzh = n(n+1)/2` entries).
+
+!!! warning "Not recommended"
+    See [`hess_coord!`](@ref). Throws an `ArgumentError` when `nvar > max_hess_nvar`.
+"""
+function NLPModels.hess_structure!(nlp::LuxNLPModel, rows::AbstractVector{<:Integer},
+                                   cols::AbstractVector{<:Integer})
+  @lencheck nlp.meta.nnzh rows cols
+  _check_hess_size(nlp)
+  n = nlp.meta.nvar
+  k = 0
+  for j in 1:n, i in j:n
+    k += 1
+    rows[k] = i
+    cols[k] = j
+  end
+  return rows, cols
+end
+
+"""
+    hess_coord!(nlp::LuxNLPModel, x, y, vals; obj_weight = 1)
+
+Values of the explicit Hessian (dense lower triangle, ordered as in `hess_structure!`),
+computed column by column with `n` Hessian-vector products. `y` must be empty (no
+constraints). `hess_coord!(nlp, x, vals)`, `hess_coord` and `hess` from NLPModels call this method.
+
+!!! warning "Not recommended"
+    Neural-network Hessians are dense: `n(n+1)/2` entries and `n` Hessian-vector products
+    per evaluation. Only for small networks (e.g. to try R2N with a direct HSL subsolver as
+    a reference). Prefer `hprod!` / `hess_op`. Throws an `ArgumentError` when
+    `nvar > max_hess_nvar` (default 5_000, set in the constructor).
+"""
+function NLPModels.hess_coord!(nlp::LuxNLPModel, x::AbstractVector, y::AbstractVector,
+                               vals::AbstractVector; obj_weight::Real = one(eltype(x)))
+  @lencheck nlp.meta.nvar x
+  @lencheck 0 y
+  @lencheck nlp.meta.nnzh vals
+  _check_hess_size(nlp)
+  increment!(nlp, :neval_hess)
+  n = nlp.meta.nvar
+  _account!(nlp; hvp = n)
+  ctx = _contexts(nlp)
+  e = fill!(similar(x), 0)
+  Hcol = similar(x)
+  prep = _hvp_prep(nlp, x, e, ctx)
+  k = 1
+  for j in 1:n
+    e[j:j] .= 1                       # range broadcast: no scalar indexing on GPU arrays
+    DI.hvp!(_objective, (Hcol,), prep, nlp.hvp_backend, x, (e,), ctx...)
+    e[j:j] .= 0
+    len = n - j + 1
+    copyto!(vals, k, Hcol, j, len)    # lower part of column j
+    k += len
+  end
+  isone(obj_weight) || (vals .*= obj_weight)
+  return vals
 end

@@ -12,7 +12,8 @@ Per-iteration record filled by [`logging_callback`](@ref). All fields are vector
 - `full_objective` (loss on the full training data; `NaN` when not evaluated),
 - `metric` (user-defined, e.g. test accuracy or PINN relative L2 error; `nothing` when not evaluated),
 - `neval_obj`, `neval_grad`, `neval_hprod` (NLPModels counters),
-- `forward`, `backward`, `hvp`, `epochs` (see [`work`](@ref)).
+- `neval_residual`, `neval_jprod_residual`, `neval_jtprod_residual` (NLS counters; 0 for NLP models),
+- `forward`, `backward`, `jvp`, `hvp`, `epochs` (see [`work`](@ref)).
 """
 Base.@kwdef mutable struct TrainingLog
   iter::Vector{Int} = Int[]
@@ -24,8 +25,12 @@ Base.@kwdef mutable struct TrainingLog
   neval_obj::Vector{Int} = Int[]
   neval_grad::Vector{Int} = Int[]
   neval_hprod::Vector{Int} = Int[]
+  neval_residual::Vector{Int} = Int[]
+  neval_jprod_residual::Vector{Int} = Int[]
+  neval_jtprod_residual::Vector{Int} = Int[]
   forward::Vector{Int} = Int[]
   backward::Vector{Int} = Int[]
+  jvp::Vector{Int} = Int[]
   hvp::Vector{Int} = Int[]
   epochs::Vector{Float64} = Float64[]
   overhead::Float64 = 0.0
@@ -65,9 +70,14 @@ function logging_callback(log::TrainingLog; every::Integer = 1, full::Bool = fal
     push!(log.neval_obj, neval_obj(nlp))
     push!(log.neval_grad, neval_grad(nlp))
     push!(log.neval_hprod, neval_hprod(nlp))
+    nls = nlp isa AbstractNLSModel
+    push!(log.neval_residual, nls ? neval_residual(nlp) : 0)
+    push!(log.neval_jprod_residual, nls ? neval_jprod_residual(nlp) : 0)
+    push!(log.neval_jtprod_residual, nls ? neval_jtprod_residual(nlp) : 0)
     w = work(nlp)
     push!(log.forward, w.forward)
     push!(log.backward, w.backward)
+    push!(log.jvp, w.jvp)
     push!(log.hvp, w.hvp)
     push!(log.epochs, w.epochs)
     # The solver's clock includes the time spent in previous callbacks: subtract it.
