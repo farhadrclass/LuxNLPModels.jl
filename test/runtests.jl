@@ -18,6 +18,8 @@ end
   nlp = LuxNLPModel(model, [(X, Y)]; ps = ps)
   w = nlp.meta.x0
   @test unconstrained(nlp)
+  @test nlp.meta.name == "LuxNLPModel"
+  @test LuxNLSModel(model, [(X, Y)]; ps = ps, name = "test").meta.name == "test"
   @test nlp.meta.nvar == Lux.parameterlength(model)
   @test obj(nlp, w) ≈ MSELoss()(first(model(X, ps, Lux.initialstates(Xoshiro(1), model))), Y)
   f, g = objgrad(nlp, w)

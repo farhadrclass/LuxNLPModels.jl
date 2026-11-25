@@ -3,6 +3,7 @@
 
 using LuxNLPModels, Lux, NLPModels, JSOSolvers, ComponentArrays, Optimisers
 using LinearAlgebra, Printf, Random
+using SolverCore: set_objective!, set_dual_residual!
 
 struct Collocation{A}
   x::A
@@ -35,6 +36,28 @@ err = relative_error(nls, stats.solution)
 # Minibatches of 16 points: an iterator over `Collocation` batches,
 # traversed with `minibatch_next_train!`, which returns `false` at the end of an epoch.
 batches = [Collocation(x[:, i]) for i in Iterators.partition(randperm(rng, 64), 16)]
+
+# R2NLS: the callback selects the next minibatch every k iterations and updates what R2NLS keeps
+# from the previous one (residual, gradient, objective and its norm).
+function minibatch_callback(k)
+  function callback(nls, solver, stats)
+    (stats.iter > 0 && stats.iter % k == 0) || return
+    minibatch_next_train!(nls)
+    residual!(nls, solver.x, solver.r)
+    jtprod_residual!(nls, solver.x, solver.r, solver.gx)
+    set_objective!(stats, norm(solver.r)^2 / 2)
+    set_dual_residual!(stats, norm(solver.gx))
+  end
+  return callback
+end
+
+nls = LuxNLSModel(model, batches; ps = ps)
+callback = minibatch_callback(5)
+stats = R2NLS(nls; subsolver = LSMRSubsolver, callback, max_iter = 200, max_time = 300.0)
+err = relative_error(nls, stats.solution)
+@printf "R2NLS, minibatches: relative error %.2e (%s, %d iterations)\n" err stats.status stats.iter
+
+# Adam from the same initial point, one step per minibatch.
 nls = LuxNLSModel(model, batches; ps = ps)
 w = copy(nls.meta.x0)
 g = similar(w)

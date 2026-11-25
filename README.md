@@ -35,6 +35,12 @@ nls = LuxNLSModel(model, [(x, y)])
 stats = R2NLS(nls; subsolver = LSMRSubsolver)
 ```
 
+A callback that changes the minibatch changes the objective under the solver, which still holds
+values from the previous minibatch.
+`example/ode_residual.jl` shows the update R2NLS needs.
+R2 also keeps the objective and the gradient norm in local variables, so with the callback above
+its ratio ρ compares two consecutive minibatches.
+
 Pass `device = gpu_device()` to the constructor to work on the GPU.
 
 ## Other data
@@ -47,5 +53,5 @@ see `example/ode_residual.jl`.
 ## Examples
 
 - `example/MNIST_mlp.jl`: a multilayer perceptron on MNIST, trained with R2 and with Adam.
-- `example/ode_residual.jl`: a network fitted to the solution of an ODE through its residuals, with full
-  batches and with minibatches.
+- `example/ode_residual.jl`: a network fitted to the solution of an ODE through its residuals, with
+  R2NLS on the full batch, and with R2NLS and Adam on minibatches.

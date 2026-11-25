@@ -47,7 +47,7 @@ mutable struct LuxNLPModel{T, S, M, F, A, ST, D} <: AbstractLuxNLPModel{T, S}
 end
 
 """
-    LuxNLPModel(model, data_train, data_test = data_train; loss_f = MSELoss(), rng = Random.default_rng(), ps, st, device = cpu_device())
+    LuxNLPModel(model, data_train, data_test = data_train; loss_f = MSELoss(), rng = Random.default_rng(), ps, st, device = cpu_device(), name = "LuxNLPModel")
 
 Build a `LuxNLPModel` from the Lux network `model`.
 `data_train` and `data_test` are iterators over minibatches `(x, y)`, e.g. `MLUtils.DataLoader`s;
@@ -65,9 +65,10 @@ function LuxNLPModel(
   ps = Lux.initialparameters(rng, model),
   st = Lux.initialstates(rng, model),
   device = cpu_device(),
+  name::AbstractString = "LuxNLPModel",
 )
   x0, ps_axes, st, train, test = lux_setup(model, ps, st, device, data_train, data_test)
-  meta = NLPModelMeta(length(x0); x0 = x0, variable_bounds_analysis = false)
+  meta = NLPModelMeta(length(x0); x0 = x0, name = name, variable_bounds_analysis = false)
   return LuxNLPModel(
     meta,
     Counters(),
@@ -111,7 +112,7 @@ mutable struct LuxNLSModel{T, S, M, F, A, ST, D} <: AbstractLuxNLSModel{T, S}
 end
 
 """
-    LuxNLSModel(model, data_train, data_test = data_train; residual_f = (ŷ, y) -> ŷ .- y, rng = Random.default_rng(), ps, st, device = cpu_device())
+    LuxNLSModel(model, data_train, data_test = data_train; residual_f = (ŷ, y) -> ŷ .- y, rng = Random.default_rng(), ps, st, device = cpu_device(), name = "LuxNLSModel")
 
 Build a `LuxNLSModel` from the Lux network `model`; see [`LuxNLPModel`](@ref) for the arguments.
 The number of residuals is set by the first training minibatch, so all minibatches must
@@ -126,10 +127,11 @@ function LuxNLSModel(
   ps = Lux.initialparameters(rng, model),
   st = Lux.initialstates(rng, model),
   device = cpu_device(),
+  name::AbstractString = "LuxNLSModel",
 )
   x0, ps_axes, st, train, test = lux_setup(model, ps, st, device, data_train, data_test)
   n = length(x0)
-  meta = NLPModelMeta(n; x0 = x0, variable_bounds_analysis = false)
+  meta = NLPModelMeta(n; x0 = x0, name = name, variable_bounds_analysis = false)
   nls = LuxNLSModel(
     meta,
     NLSMeta(1, n; x0 = x0),
